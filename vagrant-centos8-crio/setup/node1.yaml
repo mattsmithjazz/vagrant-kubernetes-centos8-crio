@@ -1,0 +1,131 @@
+---
+- hosts: all
+  become: true
+  tasks:
+     
+   - name: add kubernetes repo...
+     shell:
+       cmd: |
+           cat <<EOF > /etc/yum.repos.d/kubernetes.repo
+           [kubernetes]
+           name=Kubernetes
+           baseurl=https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
+           enabled=1
+           gpgcheck=1
+           repo_gpgcheck=1
+           gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
+           EOF
+
+   - name: add cri-o repo...
+     get_url: 
+       url: https://download.opensuse.org/repositories/devel:kubic:libcontainers:stable:cri-o:1.17:1.17.4/CentOS_8_Stream/devel:kubic:libcontainers:stable:cri-o:1.17:1.17.4.repo
+       dest: /etc/yum.repos.d/crio.repo
+
+   - name: enable rpm-fusion and epel-release...
+     command: "{{ item }}"
+     with_items:
+       - dnf install --nogpgcheck https://mirrors.rpmfusion.org/free/el/rpmfusion-free-release-8.noarch.rpm https://mirrors.rpmfusion.org/nonfree/el/rpmfusion-nonfree-release-8.noarch.rpm -y
+       - dnf install -y epel-release
+       - dnf config-manager --enable PowerTools -y
+       - dnf update -y --allowerasing
+       - dnf install -y @server-product-environment
+       - dnf install --nogpgcheck --allowerasing https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/CentOS_8/x86_64/conmon-2.0.21-1.el8.x86_64.rpm -y
+
+   
+   - name: install kubernetes and xtables
+     dnf:
+       name: ['kubeadm, kmod-xtables-addons, libseccomp, iproute-tc']
+       state: present
+
+   - name: reboot system to build xtables into kernel
+     reboot:
+       
+
+   - name: install cri-o module
+     dnf:
+       name: cri-o
+       state: present
+
+   - name: enable and start crio...
+     service:
+       name: crio
+       enabled: yes
+       state: started
+
+   - name: set a hostname
+     hostname:
+       name: node1
+  
+   
+     
+   - name: enable cgroup selinux boolean to prevent denials
+     ansible.posix.seboolean:
+       name: container_manage_cgroup
+       state: yes
+       persistent: yes
+  
+   - name: disable swap
+     command: swapoff -a
+     when: ansible_swaptotal_mb > 0
+  
+   - name: remove swapfile from /etc/fstab
+     mount:
+       name: "{{ item }}"
+       fstype: swap
+       state: absent
+     with_items:
+       - swap
+       - none
+
+   - name: enable overlay module
+     command: modprobe overlay
+
+   - name: enable br_netfilter
+     command: modprobe br_netfilter
+
+   - name: set up required sysctl params
+     shell:
+       cmd: |
+         cat <<EOF | sudo tee -a /etc/sysctl.conf
+         net.bridge.bridge-nf-call-iptables  = 1
+         net.ipv4.ip_forward                 = 1
+         net.bridge.bridge-nf-call-ip6tables = 1
+         EOF
+
+   - name: run sysctl
+     command: sysctl --system
+
+   - name: create kubeadm drop-in directory
+     file:
+       path: /etc/systemd/system/kubelet.service.d
+       state: directory
+       mode: '0755'
+
+   - name: copy systemd kubelet file to system
+     copy:
+       src: ./10-kubeadm.conf
+       dest: /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
+       owner: root
+       group: root
+       mode: '0644'
+
+   - name: Configure node ip
+     lineinfile:
+       path: /etc/sysconfig/kubelet
+       line: KUBELET_EXTRA_ARGS=--node_ip=192.168.50.100
+
+   - name: reload systemd
+     systemd:
+       daemon_reload: yes
+
+   - name: enable kubelet
+     service: 
+       name: kubelet
+       enabled: yes
+       
+
+   - name: Copy the join command to server location
+     copy: src=join-command dest=/tmp/join-command.sh mode=0777
+ 
+   - name: Join the node to cluster
+     command: sh /tmp/join-command.sh 
